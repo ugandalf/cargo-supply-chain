@@ -1,66 +1,83 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use crate::publishers::fetch_owners_of_crates;
+use crate::MetadataArgs;
 use crate::{common::*, publishers::PublisherData};
 
-pub fn publishers(mut args: std::env::ArgsOs) {
-    while let Some(arg) = args.next() {
-        match arg.to_str() {
-            None => bail_bad_arg(arg),
-            Some("--") => break, // we pass args after this to cargo-metadata
-            _ => bail_unknown_subcommand_arg("publishers", arg),
-        }
-    }
-
-    let dependencies = sourced_dependencies(args);
+pub fn publishers(
+    metadata_args: MetadataArgs,
+    diffable: bool,
+    max_age: std::time::Duration,
+) -> Result<(), std::io::Error> {
+    let dependencies = sourced_dependencies(metadata_args);
     complain_about_non_crates_io_crates(&dependencies);
-    let (publisher_users, publisher_teams) = fetch_owners_of_crates(&dependencies);
+    let (publisher_users, publisher_teams) = fetch_owners_of_crates(&dependencies, max_age)?;
 
-    if publisher_users.len() > 0 {
+    // Group data by user rather than by crate
+    let mut user_to_crate_map = transpose_publishers_map(&publisher_users);
+    let mut team_to_crate_map = transpose_publishers_map(&publisher_teams);
+
+    // Sort crate names alphabetically
+    user_to_crate_map.values_mut().for_each(|c| c.sort());
+    team_to_crate_map.values_mut().for_each(|c| c.sort());
+
+    if diffable {
+        // empty map just means 0 loop iterations here
+        let sorted_map = sort_transposed_map_for_diffing(user_to_crate_map);
+        for (user, crates) in sorted_map.iter() {
+            let crate_list = comma_separated_list(&crates);
+            println!("user \"{}\": {}", &user.login, crate_list);
+        }
+    } else if !publisher_users.is_empty() {
         println!("\nThe following individuals can publish updates for your dependencies:\n");
-        let user_to_crate_map = transpose_publishers_map(&publisher_users);
         let map_for_display = sort_transposed_map_for_display(user_to_crate_map);
         for (i, (user, crates)) in map_for_display.iter().enumerate() {
             // We do not print usernames, since you can embed terminal control sequences in them
             // and erase yourself from the output that way.
-            // TODO: check if it's possible to smuggle those into github/crates.io usernames
             let crate_list = comma_separated_list(&crates);
             println!(" {}. {} via crates: {}", i + 1, &user.login, crate_list);
         }
+        eprintln!("\nNote: there may be outstanding publisher invitations. crates.io provides no way to list them.");
+        eprintln!("See https://github.com/rust-lang/crates.io/issues/2868 for more info.");
     }
 
-    println!("\nNote: there may be outstanding publisher invitations. crates.io provides no way to list them.");
-    println!("Invitations are also impossible to revoke, and they never expire.");
-    println!("See https://github.com/rust-lang/crates.io/issues/2868 for more info.");
-
-    if publisher_teams.len() > 0 {
+    if diffable {
+        let sorted_map = sort_transposed_map_for_diffing(team_to_crate_map);
+        for (team, crates) in sorted_map.iter() {
+            let crate_list = comma_separated_list(&crates);
+            println!("team \"{}\": {}", &team.login, crate_list);
+        }
+    } else if !publisher_teams.is_empty() {
         println!(
             "\nAll members of the following teams can publish updates for your dependencies:\n"
         );
-        let team_to_crate_map = transpose_publishers_map(&publisher_teams);
         let map_for_display = sort_transposed_map_for_display(team_to_crate_map);
         for (i, (team, crates)) in map_for_display.iter().enumerate() {
             let crate_list = comma_separated_list(&crates);
-            if let Some(url) = &team.url {
+            if let (true, Some(org)) = (
+                team.login.starts_with("github:"),
+                team.login.split(':').nth(1),
+            ) {
                 println!(
-                    " {}. \"{}\" ({}) via crates: {}",
+                    " {}. \"{}\" (https://github.com/{}) via crates: {}",
                     i + 1,
                     &team.login,
-                    url,
+                    org,
                     crate_list
                 );
             } else {
                 println!(" {}. \"{}\" via crates: {}", i + 1, &team.login, crate_list);
             }
         }
-        println!("\nGithub teams are black boxes. It's impossible to get the member list without explicit permission.");
+        eprintln!("\nGithub teams are black boxes. It's impossible to get the member list without explicit permission.");
     }
+    Ok(())
 }
 
 /// Turns a crate-to-publishers mapping into publisher-to-crates mapping.
 /// BTreeMap is used because PublisherData doesn't implement Hash.
 fn transpose_publishers_map(
-    input: &HashMap<String, Vec<PublisherData>>,
+    input: &BTreeMap<String, Vec<PublisherData>>,
 ) -> BTreeMap<PublisherData, Vec<String>> {
     let mut result: BTreeMap<PublisherData, Vec<String>> = BTreeMap::new();
     for (crate_name, publishers) in input.iter() {
@@ -83,5 +100,13 @@ fn sort_transposed_map_for_display(
     result.sort_unstable_by_key(|(publisher, crates)| {
         (usize::MAX - crates.len(), publisher.login.clone())
     });
+    result
+}
+
+fn sort_transposed_map_for_diffing(
+    input: BTreeMap<PublisherData, Vec<String>>,
+) -> Vec<(PublisherData, Vec<String>)> {
+    let mut result: Vec<_> = input.into_iter().collect();
+    result.sort_unstable_by_key(|(publisher, _crates)| publisher.login.clone());
     result
 }

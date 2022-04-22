@@ -9,70 +9,47 @@
 
 #![forbid(unsafe_code)]
 
-use common::bail_bad_arg;
-
 mod api_client;
-mod authors;
+mod cli;
 mod common;
+mod crates_cache;
 mod publishers;
 mod subcommands;
 
-fn main() {
-    let mut args = std::env::args_os();
-    let _ = args.by_ref().next();
+use cli::CliArgs;
+use common::MetadataArgs;
 
-    while let Some(arg) = args.next() {
-        match arg.to_str() {
-            None => bail_bad_arg(arg),
-            Some("supply-chain") => (), // first arg when run as `cargo supply-chain`
-            Some("authors") => return subcommands::authors(args),
-            Some("publishers") => return subcommands::publishers(args),
-            Some("crates") => return subcommands::crates(args),
-            Some(arg) if arg.starts_with("--") => bail_unknown_option(arg),
-            Some(arg) if arg.starts_with('-') => bail_unknown_short_option(arg),
-            Some(arg) => bail_unknown_command(arg),
+fn main() -> Result<(), std::io::Error> {
+    let args = cli::args_parser().run();
+    dispatch_command(args)
+}
+
+fn dispatch_command(args: CliArgs) -> Result<(), std::io::Error> {
+    match args {
+        CliArgs::Publishers { args, meta_args } => {
+            subcommands::publishers(meta_args, args.diffable, args.cache_max_age)?
         }
+        CliArgs::Crates { args, meta_args } => {
+            subcommands::crates(meta_args, args.diffable, args.cache_max_age)?
+        }
+        CliArgs::Json { args, meta_args } => {
+            subcommands::json(meta_args, args.diffable, args.cache_max_age)?
+        }
+        CliArgs::JsonSchema { print_schema: () } => {
+            subcommands::print_schema()?;
+        }
+        CliArgs::Update { cache_max_age } => subcommands::update(cache_max_age),
     }
 
-    // No tool selected.
-    bail_no_tool();
+    Ok(())
 }
 
-fn bail_unknown_option(arg: &str) -> ! {
-    eprintln!("Unknown option: {}", std::path::Path::new(&arg).display());
-    eprint_help();
-    std::process::exit(1);
-}
+// TODO: remove all uses of this and return error from the function instead
+pub(crate) fn err_exit(msg: &str) -> ! {
+    match msg.into() {
+        Some(v) => eprintln!("{}", v),
+        None => (),
+    };
 
-fn bail_unknown_short_option(arg: &str) -> ! {
-    eprintln!("Unknown flag: {}", arg);
-    eprint_help();
-    std::process::exit(1);
-}
-
-fn bail_unknown_command(arg: &str) -> ! {
-    eprintln!("Unknown command: {}", arg);
-    eprint_help();
-    std::process::exit(1);
-}
-
-fn bail_no_tool() -> ! {
-    eprintln!("No tool selected.");
-    eprint_help();
-    std::process::exit(1);
-}
-
-fn eprint_help() {
-    eprintln!(
-        "Usage: cargo supply-chain COMMAND [OPTIONS...] [-- CARGO_METADATA_OPTIONS...]
-
-  Commands:
-    authors\t\tList all authors in the dependency graph (as specified in Cargo.toml)
-    publishers\t\tList all crates.io publishers in the dependency graph
-    crates\t\tList all crates in dependency graph and crates.io publishers for each
-
-  Any arguments after -- will be passed to `cargo metadata`, for example:
-    cargo supply-chain crates -- --filter-platform=x86_64-unknown-linux-gnu
-"
-    );
+    std::process::exit(1)
 }

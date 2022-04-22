@@ -1,5 +1,9 @@
-use cargo_metadata::{CargoOpt::AllFeatures, MetadataCommand, Package, PackageId};
-use std::collections::HashMap;
+use crate::err_exit;
+use cargo_metadata::{
+    CargoOpt::AllFeatures, CargoOpt::NoDefaultFeatures, MetadataCommand, Package, PackageId,
+};
+use std::{collections::HashMap, path::PathBuf};
+
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub enum PkgSource {
     Local,
@@ -12,20 +16,50 @@ pub struct SourcedPackage {
     pub package: Package,
 }
 
-pub fn sourced_dependencies(mut args: std::env::ArgsOs) -> Vec<SourcedPackage> {
-    let mut extra_options: Vec<String> = Vec::new();
-    while let Some(arg) = args.next() {
-        match arg.into_string() {
-            Ok(arg) => extra_options.push(arg),
-            Err(arg) => bail_bad_arg(arg),
-        }
-    }
+/// Arguments to be passed to `cargo metadata`
+#[derive(Clone, Debug)]
+pub struct MetadataArgs {
+    // `all_features` and `no_default_features` are not mutually exclusive in `cargo metadata`,
+    // in the sense that it will not error out when encontering them; it just follows `all_features`
+    pub all_features: bool,
+    pub no_default_features: bool,
+    // This is a `String` because we don't parse the value, just pass it on to `cargo metadata` blindly
+    pub features: Option<String>,
+    pub target: Option<String>,
+    pub manifest_path: Option<PathBuf>,
+}
 
-    let meta = MetadataCommand::new()
-        .features(AllFeatures)
-        .other_options(extra_options)
-        .exec()
-        .unwrap();
+fn metadata_command(args: MetadataArgs) -> MetadataCommand {
+    let mut command = MetadataCommand::new();
+    if args.all_features {
+        command.features(AllFeatures);
+    }
+    if args.no_default_features {
+        command.features(NoDefaultFeatures);
+    }
+    if let Some(path) = args.manifest_path {
+        command.manifest_path(path);
+    }
+    let mut other_options = Vec::new();
+    if let Some(target) = args.target {
+        other_options.push(format!("--filter-platform={}", target));
+    }
+    // `cargo-metadata` crate assumes we have a Vec of features,
+    // but we really didn't want to parse it ourselves, so we pass the argument directly
+    if let Some(features) = args.features {
+        other_options.push(format!("--features={}", features));
+    }
+    command.other_options(other_options);
+    command
+}
+
+pub fn sourced_dependencies(metadata_args: MetadataArgs) -> Vec<SourcedPackage> {
+    let command = metadata_command(metadata_args);
+    let meta = match command.exec() {
+        Ok(v) => v,
+        Err(cargo_metadata::Error::CargoMetadata { stderr: e }) => err_exit(&e),
+        Err(err) => err_exit(format!("Failed to fetch crate metadata!\n  {}", err).as_str()),
+    };
 
     let mut how: HashMap<PackageId, PkgSource> = HashMap::new();
     let what: HashMap<PackageId, Package> = meta
@@ -82,22 +116,22 @@ pub fn complain_about_non_crates_io_crates(dependencies: &[SourcedPackage]) {
     {
         // scope bound to avoid accidentally referencing local crates when working with foreign ones
         let local_crate_names = crate_names_from_source(dependencies, PkgSource::Local);
-        if local_crate_names.len() > 0 {
-            println!(
+        if !local_crate_names.is_empty() {
+            eprintln!(
                 "\nThe following crates will be ignored because they come from a local directory:"
             );
             for crate_name in &local_crate_names {
-                println!(" - {}", crate_name);
+                eprintln!(" - {}", crate_name);
             }
         }
     }
 
     {
         let foreign_crate_names = crate_names_from_source(dependencies, PkgSource::Foreign);
-        if foreign_crate_names.len() > 0 {
-            println!("\nCannot audit the following crates because they are not from crates.io:");
+        if !foreign_crate_names.is_empty() {
+            eprintln!("\nCannot audit the following crates because they are not from crates.io:");
             for crate_name in &foreign_crate_names {
-                println!(" - {}", crate_name);
+                eprintln!(" - {}", crate_name);
             }
         }
     }
@@ -114,18 +148,4 @@ pub fn comma_separated_list(list: &[String]) -> String {
         result.push_str(crate_name.as_str());
     }
     result
-}
-
-pub fn bail_bad_arg(arg: std::ffi::OsString) -> ! {
-    eprintln!("Bad argument: {}", std::path::Path::new(&arg).display());
-    std::process::exit(1);
-}
-
-pub fn bail_unknown_subcommand_arg(subcommand: &str, arg: std::ffi::OsString) {
-    eprintln!(
-        "Bad argument to {} command: {}",
-        subcommand,
-        std::path::Path::new(&arg).display()
-    );
-    std::process::exit(1);
 }
