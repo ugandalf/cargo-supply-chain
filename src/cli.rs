@@ -247,4 +247,9 @@ mod tests {
         assert!(parse_args(&["supply-chain", "supply-chain", "json", "--print-schema"]).is_err());
         assert!(parse_args(&["supply-chain", "supply-chain", "crates", "-d"]).is_err());
     }
+    
+    #[test]
+    fn test_fail() {
+        assert!(false);
+    }
 }
