@@ -19,10 +19,8 @@ jobs:
         command: build
         args: --verbose
     - name: test
-      uses: actions-rs/cargo@v1
-      with:
-        command: test
-        args: --tests
+      run: >
+        cargo test --tests
   rustfmt:
     runs-on: ubuntu-latest
     steps:
